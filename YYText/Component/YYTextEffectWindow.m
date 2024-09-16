@@ -14,54 +14,186 @@
 #import "YYTextUtilities.h"
 #import "UIView+YYText.h"
 
-static YYTextEffectWindow *one = nil;
-static dispatch_once_t onceToken;
-
 @implementation YYTextEffectWindow
 
-+ (instancetype)sharedWindow {
-    dispatch_once(&onceToken, ^{
-        one = [[YYTextEffectWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    });
-    return one;
-}
-
-- (instancetype)initWithFrame:(CGRect)frame
-{
-    self = [super initWithFrame:frame];
-    if (self) {
-        // UIWindow 需要一个 rootViewController 来管理和响应设备方向的改变（适配pad横竖屏）
-        UIViewController *rootViewController = [[UIViewController alloc] init];
-        rootViewController.view.backgroundColor = [UIColor clearColor];
-        self.rootViewController = rootViewController;
-        
-        #if defined(__IPHONE_13_0) && (__IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_13_0)
-            if (@available(iOS 13.0, *)) {
-                for (UIWindowScene* windowScene in [UIApplication sharedApplication].connectedScenes){
-                    if (windowScene.activationState == UISceneActivationStateForegroundActive){
-                        self.windowScene = windowScene;
-                        break;
-                    }
-                }
-            }
-        #endif
-        
-        self.userInteractionEnabled = NO;
-        self.windowLevel = UIWindowLevelAlert;
-        self.hidden = YES;
-        
-        // for iOS 9:
-        self.opaque = NO;
-        self.backgroundColor = [UIColor clearColor];
-        self.layer.backgroundColor = [UIColor clearColor].CGColor;
-    }
-    return self;
-}
-
+#pragma mark - overwrite
 // stop self from becoming the KeyWindow
 - (void)becomeKeyWindow {
     [[YYTextSharedApplication().delegate window] makeKeyWindow];
 }
+
+// 全屏的window会影响顶部状态栏展示，这里需要设置下
+- (UIViewController *)rootViewController {
+    UIWindow *effectWin = [YYTextEffectWindow YYkeyWindow];
+    if (!effectWin) {
+        effectWin = [YYTextSharedApplication().delegate window];
+    }
+    return effectWin.rootViewController;
+}
+
+#pragma mark - public
++ (instancetype)sharedWindow {
+    static YYTextEffectWindow *one = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (!YYTextIsAppExtension()) {
+            one = [self new];
+            one.frame = (CGRect){.size = YYTextScreenSize()};
+            one.userInteractionEnabled = NO;
+            one.windowLevel = UIWindowLevelStatusBar + 1;
+            one.hidden = YES;
+            
+            // for iOS 9:
+            one.opaque = NO;
+            one.backgroundColor = [UIColor clearColor];
+            one.layer.backgroundColor = [UIColor clearColor].CGColor;
+        }
+    });
+    return one;
+}
+
+// 展示放大镜
+- (void)showMagnifier:(YYTextMagnifier *)mag {
+    if (!mag) return;
+    if (mag.superview != self) [self addSubview:mag];
+    [self _updateWindowLevel];
+    CGFloat rotation = [self _updateMagnifier:mag];
+    CGPoint center = [self yy_convertPoint:mag.hostPopoverCenter fromViewOrWindow:mag.hostView];
+    CGAffineTransform trans = CGAffineTransformMakeRotation(rotation);
+    trans = CGAffineTransformScale(trans, 0.3, 0.3);
+    mag.transform = trans;
+    mag.center = center;
+    if (mag.type == YYTextMagnifierTypeRanged) {
+        mag.alpha = 0;
+    }
+    NSTimeInterval time = mag.type == YYTextMagnifierTypeCaret ? 0.08 : 0.1;
+    [UIView animateWithDuration:time delay:0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
+        if (mag.type == YYTextMagnifierTypeCaret) {
+            CGPoint newCenter = CGPointMake(0, -mag.fitSize.height / 2);
+            newCenter = CGPointApplyAffineTransform(newCenter, CGAffineTransformMakeRotation(rotation));
+            newCenter.x += center.x;
+            newCenter.y += center.y;
+            mag.center = [self _correctedCenter:newCenter forMagnifier:mag rotation:rotation];
+        } else {
+            mag.center = [self _correctedCenter:center forMagnifier:mag rotation:rotation];
+        }
+        mag.transform = CGAffineTransformMakeRotation(rotation);
+        mag.alpha = 1;
+    } completion:^(BOOL finished) {
+        
+    }];
+    
+    [self showWindow];
+}
+
+// 移动放大镜
+- (void)moveMagnifier:(YYTextMagnifier *)mag {
+    if (!mag) return;
+    [self _updateWindowLevel];
+    CGFloat rotation = [self _updateMagnifier:mag];
+    CGPoint center = [self yy_convertPoint:mag.hostPopoverCenter fromViewOrWindow:mag.hostView];
+    if (mag.type == YYTextMagnifierTypeCaret) {
+        CGPoint newCenter = CGPointMake(0, -mag.fitSize.height / 2);
+        newCenter = CGPointApplyAffineTransform(newCenter, CGAffineTransformMakeRotation(rotation));
+        newCenter.x += center.x;
+        newCenter.y += center.y;
+        mag.center = [self _correctedCenter:newCenter forMagnifier:mag rotation:rotation];
+    } else {
+        mag.center = [self _correctedCenter:center forMagnifier:mag rotation:rotation];
+    }
+    mag.transform = CGAffineTransformMakeRotation(rotation);
+}
+
+// 隐藏放大镜
+- (void)hideMagnifier:(YYTextMagnifier *)mag {
+    if (mag && mag.superview == self) {
+        CGFloat rotation = [self _updateMagnifier:mag];
+        CGPoint center = [self yy_convertPoint:mag.hostPopoverCenter fromViewOrWindow:mag.hostView];
+        NSTimeInterval time = mag.type == YYTextMagnifierTypeCaret ? 0.20 : 0.15;
+        [UIView animateWithDuration:time delay:0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
+            
+            CGAffineTransform trans = CGAffineTransformMakeRotation(rotation);
+            trans = CGAffineTransformScale(trans, 0.01, 0.01);
+            mag.transform = trans;
+            
+            if (mag.type == YYTextMagnifierTypeCaret) {
+                CGPoint newCenter = CGPointMake(0, -mag.fitSize.height / 2);
+                newCenter = CGPointApplyAffineTransform(newCenter, CGAffineTransformMakeRotation(rotation));
+                newCenter.x += center.x;
+                newCenter.y += center.y;
+                mag.center = [self _correctedCenter:newCenter forMagnifier:mag rotation:rotation];
+            } else {
+                mag.center = [self _correctedCenter:center forMagnifier:mag rotation:rotation];
+                mag.alpha = 0;
+            }
+            
+        } completion:^(BOOL finished) {
+            if (finished) {
+                [mag removeFromSuperview];
+                mag.transform = CGAffineTransformIdentity;
+                mag.alpha = 1;
+            }
+        }];
+    }
+    [self hideWindow];
+}
+
+// 展示选中文本的红点
+- (void)showSelectionDot:(YYTextSelectionView *)selection {
+    if (!selection || !selection.selectionRects || selection.selectionRects.count <= 0) return;
+    [self _updateWindowLevel];
+    [self insertSubview:selection.startGrabber.dot.mirror atIndex:0];
+    [self insertSubview:selection.endGrabber.dot.mirror atIndex:0];
+    [self _updateSelectionGrabberDot:selection.startGrabber.dot selection:selection];
+    [self _updateSelectionGrabberDot:selection.endGrabber.dot selection:selection];
+    [self showWindow];
+}
+
+// 选中dot会不停的重新计算位置，添加逻辑判断是否正在展示Magnifier视图，没有的话隐藏window
+- (void)hideSelectionDot:(YYTextSelectionView *)selection {
+    if (selection) {
+        [selection.startGrabber.dot.mirror removeFromSuperview];
+        [selection.endGrabber.dot.mirror removeFromSuperview];
+    }
+    if (![self hasMagnifierInView]) {
+        [self hideWindow];
+    }
+}
+
+// 获取当前的keyWindow
++ (UIWindow *)YYkeyWindow {
+    // 设置默认返回
+    UIWindow *resultWindow = [[UIApplication sharedApplication].delegate window];
+    // 在window数组中获取
+    if (@available(iOS 13.0, *)) {
+        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
+        for (UIScene *scene in connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                if (windowScene.windows.count > 0) {
+                    for (UIWindow *winT2 in windowScene.windows) {
+                        BOOL windowIsVisible = !winT2.isHidden && winT2.alpha > 0;
+                        BOOL isActive = winT2.windowScene.activationState == UISceneActivationStateForegroundActive;
+                        if (windowIsVisible && winT2.isKeyWindow && isActive) {
+                            resultWindow = winT2;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (UIWindow *winT2 in [UIApplication sharedApplication].windows) {
+            BOOL windowIsVisible = !winT2.isHidden && winT2.alpha > 0;
+            if (windowIsVisible && winT2.isKeyWindow) {
+                resultWindow = winT2;
+            }
+        }
+    }
+    
+    return resultWindow;
+}
+
+#pragma mark - private
 
 - (void)hideWindow {
     self.hidden = YES;
@@ -302,89 +434,6 @@ static dispatch_once_t onceToken;
     return rotation;
 }
 
-- (void)showMagnifier:(YYTextMagnifier *)mag {
-    if (!mag) return;
-    if (mag.superview != self) [self addSubview:mag];
-    [self _updateWindowLevel];
-    CGFloat rotation = [self _updateMagnifier:mag];
-    CGPoint center = [self yy_convertPoint:mag.hostPopoverCenter fromViewOrWindow:mag.hostView];
-    CGAffineTransform trans = CGAffineTransformMakeRotation(rotation);
-    trans = CGAffineTransformScale(trans, 0.3, 0.3);
-    mag.transform = trans;
-    mag.center = center;
-    if (mag.type == YYTextMagnifierTypeRanged) {
-        mag.alpha = 0;
-    }
-    NSTimeInterval time = mag.type == YYTextMagnifierTypeCaret ? 0.08 : 0.1;
-    [UIView animateWithDuration:time delay:0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        if (mag.type == YYTextMagnifierTypeCaret) {
-            CGPoint newCenter = CGPointMake(0, -mag.fitSize.height / 2);
-            newCenter = CGPointApplyAffineTransform(newCenter, CGAffineTransformMakeRotation(rotation));
-            newCenter.x += center.x;
-            newCenter.y += center.y;
-            mag.center = [self _correctedCenter:newCenter forMagnifier:mag rotation:rotation];
-        } else {
-            mag.center = [self _correctedCenter:center forMagnifier:mag rotation:rotation];
-        }
-        mag.transform = CGAffineTransformMakeRotation(rotation);
-        mag.alpha = 1;
-    } completion:^(BOOL finished) {
-        
-    }];
-    
-    [self showWindow];
-}
-
-- (void)moveMagnifier:(YYTextMagnifier *)mag {
-    if (!mag) return;
-    [self _updateWindowLevel];
-    CGFloat rotation = [self _updateMagnifier:mag];
-    CGPoint center = [self yy_convertPoint:mag.hostPopoverCenter fromViewOrWindow:mag.hostView];
-    if (mag.type == YYTextMagnifierTypeCaret) {
-        CGPoint newCenter = CGPointMake(0, -mag.fitSize.height / 2);
-        newCenter = CGPointApplyAffineTransform(newCenter, CGAffineTransformMakeRotation(rotation));
-        newCenter.x += center.x;
-        newCenter.y += center.y;
-        mag.center = [self _correctedCenter:newCenter forMagnifier:mag rotation:rotation];
-    } else {
-        mag.center = [self _correctedCenter:center forMagnifier:mag rotation:rotation];
-    }
-    mag.transform = CGAffineTransformMakeRotation(rotation);
-}
-
-- (void)hideMagnifier:(YYTextMagnifier *)mag {
-    if (mag && mag.superview == self) {
-        CGFloat rotation = [self _updateMagnifier:mag];
-        CGPoint center = [self yy_convertPoint:mag.hostPopoverCenter fromViewOrWindow:mag.hostView];
-        NSTimeInterval time = mag.type == YYTextMagnifierTypeCaret ? 0.20 : 0.15;
-        [UIView animateWithDuration:time delay:0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-            
-            CGAffineTransform trans = CGAffineTransformMakeRotation(rotation);
-            trans = CGAffineTransformScale(trans, 0.01, 0.01);
-            mag.transform = trans;
-            
-            if (mag.type == YYTextMagnifierTypeCaret) {
-                CGPoint newCenter = CGPointMake(0, -mag.fitSize.height / 2);
-                newCenter = CGPointApplyAffineTransform(newCenter, CGAffineTransformMakeRotation(rotation));
-                newCenter.x += center.x;
-                newCenter.y += center.y;
-                mag.center = [self _correctedCenter:newCenter forMagnifier:mag rotation:rotation];
-            } else {
-                mag.center = [self _correctedCenter:center forMagnifier:mag rotation:rotation];
-                mag.alpha = 0;
-            }
-            
-        } completion:^(BOOL finished) {
-            if (finished) {
-                [mag removeFromSuperview];
-                mag.transform = CGAffineTransformIdentity;
-                mag.alpha = 1;
-            }
-        }];
-    }
-    [self hideWindow];
-}
-
 - (BOOL)hasMagnifierInView {
     if (self.subviews && self.subviews.count > 0) {
         for (UIView *subV in self.subviews) {
@@ -429,25 +478,5 @@ static dispatch_once_t onceToken;
     }
 }
 
-- (void)showSelectionDot:(YYTextSelectionView *)selection {
-    if (!selection || !selection.selectionRects || selection.selectionRects.count <= 0) return;
-    [self _updateWindowLevel];
-    [self insertSubview:selection.startGrabber.dot.mirror atIndex:0];
-    [self insertSubview:selection.endGrabber.dot.mirror atIndex:0];
-    [self _updateSelectionGrabberDot:selection.startGrabber.dot selection:selection];
-    [self _updateSelectionGrabberDot:selection.endGrabber.dot selection:selection];
-    [self showWindow];
-}
-
-// 选中dot会不停的重新计算位置，添加逻辑判断是否正在展示Magnifier视图，没有的话隐藏window
-- (void)hideSelectionDot:(YYTextSelectionView *)selection {
-    if (selection) {
-        [selection.startGrabber.dot.mirror removeFromSuperview];
-        [selection.endGrabber.dot.mirror removeFromSuperview];
-    }
-    if (![self hasMagnifierInView]) {
-        [self hideWindow];
-    }
-}
 
 @end
