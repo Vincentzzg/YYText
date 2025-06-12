@@ -1382,6 +1382,9 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 /// The caller should make sure the `range` and `text` are valid before call this method.
 - (void)_replaceRange:(YYTextRange *)range withText:(NSString *)text notifyToDelegate:(BOOL)notify {
     /// ⚠️⚠️⚠️ LYH Support: fix #374
+    range = [self _correctedTextRange:range];
+    if (!range) return;
+    
     if (notify) [_inputDelegate textWillChange:self];
     NSRange newRange = NSMakeRange(range.asRange.location, text.length);
     [_innerText replaceCharactersInRange:range.asRange withString:text];
