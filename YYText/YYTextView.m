@@ -604,16 +604,10 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
     
     if (self.isFirstResponder || _containerView.isFirstResponder) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            UIMenuController *menu = [UIMenuController sharedMenuController];
-            [menu update];
-            if (!self->_state.showingMenu || !menu.menuVisible) {
+            [self updateUIMenu];
+            if (!self->_state.showingMenu || ![self isUIMenuVisible]) {
                 self->_state.showingMenu = YES;
-                if (@available(iOS 13.0, *)) {
-                    [menu showMenuFromView:self->_selectionView rect:CGRectStandardize(rect)];
-                } else {
-                    [menu setTargetRect:CGRectStandardize(rect) inView:self->_selectionView];
-                    [menu setMenuVisible:YES animated:YES];
-                }
+                [self showUIMenuFromView:self->_selectionView rect:CGRectStandardize(rect)];
             }
         });
     }
@@ -623,12 +617,7 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 - (void)_hideMenu {
     if (_state.showingMenu) {
         _state.showingMenu = NO;
-        UIMenuController *menu = [UIMenuController sharedMenuController];
-        if (@available(iOS 13.0, *)) {
-            [menu hideMenu];
-        } else {
-            [menu setMenuVisible:NO animated:YES];
-        }
+        [self hideUIMenu];
     }
     if (_containerView.isFirstResponder) {
         _state.ignoreFirstResponder = YES;
@@ -1274,8 +1263,7 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 /// Update the text view state when pasteboard changed.
 - (void)_pasteboardChanged {
     if (_state.showingMenu) {
-        UIMenuController *menu = [UIMenuController sharedMenuController];
-        [menu update];
+        [self updateUIMenu];
     }
 }
 
@@ -2852,6 +2840,34 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
     }
 }
 
+#pragma mark - UIMenu相关代码 方便继承
+- (void)showUIMenuFromView:(UIView *)targetView rect:(CGRect)targetRect {
+    UIMenuController *menu = [UIMenuController sharedMenuController];
+    if (@available(iOS 13.0, *)) {
+        [menu showMenuFromView:targetView rect:targetRect];
+    } else {
+        [menu setTargetRect:targetRect inView:targetView];
+        [menu setMenuVisible:YES animated:YES];
+    }
+}
+
+- (void)hideUIMenu {
+    UIMenuController *menu = [UIMenuController sharedMenuController];
+    if (@available(iOS 13.0, *)) {
+        [menu hideMenu];
+    } else {
+        [menu setMenuVisible:NO animated:YES];
+    }
+}
+
+- (void)updateUIMenu {
+    [[UIMenuController sharedMenuController] update];
+}
+
+- (BOOL)isUIMenuVisible {
+    return [[UIMenuController sharedMenuController] isMenuVisible];
+}
+
 #pragma mark - Override NSObject(UIResponderStandardEditActions)
 
 - (void)cut:(id)sender {
@@ -3183,13 +3199,26 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 - (void)deleteBackward {
     [self _updateIfNeeded];
     NSRange range = _selectedTextRange.asRange;
+    // ---------- 防御：钳位光标 ----------
+    if (range.location > _innerText.length) {
+        range.location = _innerText.length;
+        _selectedTextRange = [YYTextRange rangeWithRange:range];
+    }
+    // -----------------------------------
+    
     if (range.location == 0 && range.length == 0) return;
     _state.typingAttributesOnce = NO;
     
     // test if there's 'TextBinding' before the caret
     if (!_state.deleteConfirm && range.length == 0 && range.location > 0) {
         NSRange effectiveRange;
-        YYTextBinding *binding = [_innerText attribute:YYTextBindingAttributeName atIndex:range.location - 1 longestEffectiveRange:&effectiveRange inRange:NSMakeRange(0, _innerText.length)];
+        NSUInteger safeIdx = range.location ? range.location - 1 : 0;
+        if (safeIdx >= _innerText.length) safeIdx = _innerText.length - 1;
+        YYTextBinding *binding = [_innerText attribute:YYTextBindingAttributeName
+                                               atIndex:safeIdx
+                                 longestEffectiveRange:&effectiveRange
+                                               inRange:NSMakeRange(0, _innerText.length)];
+        
         if (binding && binding.deleteConfirm) {
             _state.deleteConfirm = YES;
             _selectedTextRange = [YYTextRange rangeWithRange:effectiveRange];
